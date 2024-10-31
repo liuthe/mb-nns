@@ -12,7 +12,7 @@ class Hubbard():
     """ The Hamiltonian of Hubbard Model
     """
 
-    def __init__(self, L, t, U, num_orbitals = 2):
+    def __init__(self, L, t, U, num_orbitals = 7):
         """ Init Hubbard model
          
         @param L (int): System size (one dimensionality)
@@ -27,7 +27,8 @@ class Hubbard():
         self.U = U
         self.num_orbitals = num_orbitals
 
-        self.hop_list = []
+        self.hop_list_up = []
+        self.hop_list_down = []
         self.inter_list = []
 
         self.H_up = torch.zeros(self.sys_size, self.sys_size)
@@ -39,10 +40,10 @@ class Hubbard():
                 idx = i * L + j
                 idxp = ((i + 1) % L) * L + j
                 idyp = i * L + ((j + 1) % L)
-                self.hop_list.append((idx, idxp))
-                self.hop_list.append((idx, idyp))
-                self.hop_list.append((idx + self.sys_size, idxp + self.sys_size))
-                self.hop_list.append((idx + self.sys_size, idyp + self.sys_size))
+                self.hop_list_up.append((idx, idxp))
+                self.hop_list_up.append((idx, idyp))
+                self.hop_list_down.append((idx + self.sys_size, idxp + self.sys_size))
+                self.hop_list_down.append((idx + self.sys_size, idyp + self.sys_size))
                 
                 self.H_up[idx, idxp] = t; self.H_up[idx, idyp] = t
                 self.H_up[idxp, idx] = t; self.H_up[idyp, idx] = t
@@ -105,9 +106,9 @@ class Hubbard():
         @returns energy (float): The local energy of the configuration
         """
         ## Move the configurations to the device
-        r_list = r_list.to(nnb._device)
-        self.H_up = self.H_up.to(nnb._device)
-        self.H_down = self.H_down.to(nnb._device)
+        r_list = r_list.to(nnb.device)
+        self.H_up = self.H_up.to(nnb.device)
+        self.H_down = self.H_down.to(nnb.device)
         ## Change the (1,-1,...) to (1,0,...)
         r_list = torch.where(r_list > 0, 1.0, 0.0) # (b, num_orbitals * sys_size)
         ## Construct the state for spin up and down
