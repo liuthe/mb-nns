@@ -47,6 +47,7 @@ class NNB(nn.Module):
         self.layer_up = NNB_single_spin(self.input_size, self.hidden_size, self.output_size_up)
         self.layer_down = NNB_single_spin(self.input_size, self.hidden_size, self.output_size_down)
 
+        self.p_neuron = nn.Parameter(torch.randn(1)) * 0.1
         # Initialize device property
         self._device = torch.device("cpu")  # Default to CPU
 
@@ -67,15 +68,18 @@ class NNB(nn.Module):
         config_fermion_down = config_fermion[:, self.input_size:] # (b, input_size)
         
         # Apply the first linear layer and reshape the output
-        #out_up = self.layer_up(config_fermion_up) # (b, output_size_up)
-        #out_down = self.layer_down(config_fermion_down) # (b, output_size_down)
-        #out_up = out_up.view(-1, self.input_size, Nup) # (b, input_size, num_fillings_up)
-        #out_down = out_down.view(-1, self.input_size, Ndown) # (b, input_size, num_fillings_down)
+        out_up = self.layer_up(config_fermion_up) # (b, output_size_up)
+        out_down = self.layer_down(config_fermion_down) # (b, output_size_down)
+        out_up = out_up.view(-1, self.input_size, Nup) # (b, input_size, num_fillings_up)
+        out_down = out_down.view(-1, self.input_size, Ndown) # (b, input_size, num_fillings_down)
         ## Use the true ground state to compute the probability, and makes b copies of them
+        #self.p_neuron = self.p_neuron.to(self.device)
         state_up = self.h_model.states_up[:,:Nup].to(self.device)
-        out_up = state_up.unsqueeze(0).expand(Nsamples, -1, -1) # (b, input_size, num_fillings_up)
+        out_up_g = state_up.unsqueeze(0).expand(Nsamples, -1, -1) # (b, input_size, num_fillings_up)
+        out_up = out_up #+ out_up_g
         state_down = self.h_model.states_down[:,:Ndown].to(self.device)
-        out_down = state_down.unsqueeze(0).expand(Nsamples, -1, -1) # (b, input_size, num_fillings_down)
+        out_down_g = state_down.unsqueeze(0).expand(Nsamples, -1, -1) # (b, input_size, num_fillings_down)
+        out_down = out_down# + out_down_g
         # Select the filled states
         filled_up = torch.nonzero(config_fermion_up == 1).reshape(-1, Nup, 2)
         filled_down = torch.nonzero(config_fermion_down == 1).reshape(-1, Ndown, 2)

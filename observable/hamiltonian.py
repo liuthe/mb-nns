@@ -108,7 +108,7 @@ class Hubbard():
         return e_loc   
 
 
-    def local_energy(self, r_list: torch.Tensor, network: nn.Module) -> float:
+    def local_energy(self, r_list: torch.Tensor, network: nn.Module, train: bool = False) -> float:
         """ Take a list of configurations
 
         @param r_list (Tensor): The configuration tensor of size (b, num_orbitals * sys_size)
@@ -151,16 +151,21 @@ class Hubbard():
             count_positive = torch.sum(r_hop[:, stid+1:edid] > 0, dim=1).float()
             phase[i, count_id] = (-1) ** count_positive
         ## Compute the free local energy
-        e_free = -self.t * torch.sum(conp_psi * phase, 0) / over_config_psi
+        over_free = torch.sum(conp_psi * phase, 0)
+        nonzero_id = torch.nonzero(torch.abs(over_config_psi))[0]
+        #e_free = -self.t * torch.sum(conp_psi * phase, 0) / over_config_psi
+        e_free = -self.t * over_free[nonzero_id] / over_config_psi[nonzero_id]
         ## Compute the interacting energy
         r_up_list = (r_list[:, :N]>0).float()      # (b, sys_size)
         r_down_list = (r_list[:, N:]>0).float()    # (b, sys_size)
         num_inter = torch.sum(r_up_list * r_down_list, 1) # (b,)
-        e_inter = num_inter * self.U                      # (b,)
+        e_inter = num_inter[nonzero_id] * self.U                      # (b,)
         ## Compute the total local energy
         e_loc = e_free + e_inter
-        return e_loc, conp_psi
-
+        if train:
+            return torch.mean(e_loc) + torch.var(e_loc)
+        else:
+            return torch.mean(e_loc)
 
 def config2state(config):
     """ Convert a configuration to a state

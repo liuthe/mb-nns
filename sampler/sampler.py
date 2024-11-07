@@ -47,7 +47,7 @@ def help_position2config(positionup: torch.Tensor, Nup: int, positiondown: torch
     config.scatter_(0, id_down_ocu, ele_down_ocu)
     return config.T
 
-def generate_sample(model: nn.Module, num_samples: int, num_chains: int = 1):
+def generate_sample(model: nn.Module, num_samples: int, num_chains: int = 1, drop_rate: float = 0.3) -> torch.Tensor:
     """ Generate samples from the model.
 
     @param model (NNB): The neural network model
@@ -61,6 +61,8 @@ def generate_sample(model: nn.Module, num_samples: int, num_chains: int = 1):
     LL = model.input_size
     Nup = model.num_fillings[0]
     Ndown = model.num_fillings[1]
+    drop_samples = round(num_samples * drop_rate)
+    num_samples = num_samples + drop_samples
     samples = torch.zeros(num_samples, num_chains, 2 * LL, dtype=torch.int)
     prob_list = torch.zeros(num_samples, num_chains, dtype=torch.complex64)
     # The first num_fillings[0]/[1] represents the filled sites for spin up/down
@@ -95,6 +97,7 @@ def generate_sample(model: nn.Module, num_samples: int, num_chains: int = 1):
             config = config.to(model.device)
             samples[i,:,:] = config
             prob_list[i] = prob_old
+    samples = samples[drop_samples:]
     samples = samples.view(-1, 2 * LL)
     prob_list = prob_list.view(-1)
     return samples, prob_list
