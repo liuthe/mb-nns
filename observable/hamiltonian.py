@@ -151,19 +151,29 @@ class Hubbard():
             count_positive = torch.sum(r_hop[:, stid+1:edid] > 0, dim=1).float()
             phase[i, count_id] = (-1) ** count_positive
         ## Compute the free local energy
-        over_free = torch.sum(conp_psi * phase, 0)
-        nonzero_id = torch.nonzero(torch.abs(over_config_psi))[0]
-        #e_free = -self.t * torch.sum(conp_psi * phase, 0) / over_config_psi
-        e_free = -self.t * over_free[nonzero_id] / over_config_psi[nonzero_id]
+        #over_free = torch.sum(conp_psi * phase, 0)
+        #nonzero_id = torch.nonzero(torch.abs(over_config_psi))[0]
+        #e_free = -self.t * over_free[nonzero_id] / over_config_psi[nonzero_id]
+        e_free = -self.t * torch.sum(conp_psi * phase, 0) / over_config_psi
+        
         ## Compute the interacting energy
         r_up_list = (r_list[:, :N]>0).float()      # (b, sys_size)
         r_down_list = (r_list[:, N:]>0).float()    # (b, sys_size)
         num_inter = torch.sum(r_up_list * r_down_list, 1) # (b,)
-        e_inter = num_inter[nonzero_id] * self.U                      # (b,)
+        #e_inter = num_inter[nonzero_id] * self.U         # (b,)
+        e_inter = num_inter * self.U                      # (b,)
         ## Compute the total local energy
-        e_loc = e_free + e_inter
+        e_loc = e_free + e_inter                          # (b,)
         if train:
-            return torch.mean(e_loc) + torch.var(e_loc)
+            # Here, we need to consider the derivative of psi
+            # Therefore, the loss is similar to that in reinforcement learning
+            log_psi = torch.log(torch.abs(over_config_psi))
+            mean_loce_logpsi = torch.mean(e_loc.detach() * log_psi)
+            loce_mean_logpsi = torch.mean(e_loc).detach() * torch.mean(log_psi)
+            return 2*(mean_loce_logpsi - loce_mean_logpsi)
+            #return 2*( mean_loce_logpsi)
+            ## Don't need to add variance into the loss
+            #return torch.mean(e_loc) + torch.var(e_loc)
         else:
             return torch.mean(e_loc)
 

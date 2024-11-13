@@ -62,7 +62,9 @@ class NNB(nn.Module):
         config_fermion = config_fermion.float()
         Nsamples = config_fermion.size(0)
         Nup = self.num_fillings[0]
+        # test whether the input has the required up and down spins
         Ndown = self.num_fillings[1]
+        assert (Nup+Ndown) == torch.sum(config_fermion[0]>0)
         # Divide the input into up and down spins
         config_fermion_up = config_fermion[:, :self.input_size] # (b, input_size)
         config_fermion_down = config_fermion[:, self.input_size:] # (b, input_size)
@@ -74,12 +76,12 @@ class NNB(nn.Module):
         out_down = out_down.view(-1, self.input_size, Ndown) # (b, input_size, num_fillings_down)
         ## Use the true ground state to compute the probability, and makes b copies of them
         #self.p_neuron = self.p_neuron.to(self.device)
-        state_up = self.h_model.states_up[:,:Nup].to(self.device)
-        out_up_g = state_up.unsqueeze(0).expand(Nsamples, -1, -1) # (b, input_size, num_fillings_up)
-        out_up = out_up #+ out_up_g
-        state_down = self.h_model.states_down[:,:Ndown].to(self.device)
-        out_down_g = state_down.unsqueeze(0).expand(Nsamples, -1, -1) # (b, input_size, num_fillings_down)
-        out_down = out_down# + out_down_g
+        #state_up = self.h_model.states_up[:,:Nup].to(self.device)
+        #out_up_g = state_up.unsqueeze(0).expand(Nsamples, -1, -1) # (b, input_size, num_fillings_up)
+        #out_up = out_up + out_up_g
+        #state_down = self.h_model.states_down[:,:Ndown].to(self.device)
+        #out_down_g = state_down.unsqueeze(0).expand(Nsamples, -1, -1) # (b, input_size, num_fillings_down)
+        #out_down = out_down + out_down_g
         # Select the filled states
         filled_up = torch.nonzero(config_fermion_up == 1).reshape(-1, Nup, 2)
         filled_down = torch.nonzero(config_fermion_down == 1).reshape(-1, Ndown, 2)
