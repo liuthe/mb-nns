@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.utils
 import torch.nn.functional as F
 
-import math
+import numpy as np
 
 class Hubbard():
     """ The Hamiltonian of Hubbard Model
@@ -51,64 +51,11 @@ class Hubbard():
                 self.H_down[idxp, idx] = -t; self.H_down[idyp, idx] = -t
                 self.inter_list.append((idx, idx + self.sys_size))
                 eigvalues_up, eigvectors_up = torch.linalg.eigh(self.H_up)
-                self.states_up = eigvectors_up
+                self.states_up = eigvectors_up.to(torch.float64)
                 eigvalues_down, eigvectors_down = torch.linalg.eigh(self.H_down)
-                self.states_down = eigvectors_down
-    def local_energy_up(self, r_list: torch.Tensor, network, hop_list: list = None) -> float:
-        """ Take a list of configurations, compute the up spin energy
+                self.states_down = eigvectors_down.to(torch.float64) 
 
-        @param r_list (Tensor): The configuration tensor of size (b, sys_size)
-        @param network (Any): The distribution network
-
-        @returns energy (float): The local energy of the configuration
-        """
-        N = self.L * self.L
-        Nup = torch.sum(r_list[0,:]>0)
-        #assert r_list.size(1) == 2 * N
-        ## Compute <config|psi>
-        r_list = r_list.float()
-        over_config_psi = network(self.states_up[:,:Nup], r_list) # (b,)
-
-        ## Compute <config H|psi>
-        if hop_list is None:
-            combined_hop = self.hop_list_up 
-        else:
-            combined_hop = hop_list
-        N_hop = len(combined_hop)
-        conp_psi = torch.zeros(N_hop, r_list.size(0), dtype=torch.float, device=r_list.device)
-        phase = torch.zeros(N_hop, r_list.size(0), dtype=torch.float, device=r_list.device)
-        for i, hop in enumerate(combined_hop):
-            r_hop = r_list.clone()
-            ### Determine whether count the config' or not
-            if hop[0] == hop[1]:
-                does_count = (r_hop[:, hop[0]] > 0) & (r_hop[:, hop[1]] > 0)
-            else:
-                does_count = (r_hop[:, hop[0]] > 0) ^ (r_hop[:, hop[1]] > 0)
-            count_id = torch.nonzero(does_count)
-            if count_id.size(0) == 0:
-                continue
-            else:
-                count_id = count_id.squeeze(1)
-            r_hop = r_hop[count_id]
-            ### Flip the configuration 
-            r_hop[:, hop[0]] = -r_hop[:, hop[0]]
-            r_hop[:, hop[1]] = -r_hop[:, hop[1]]
-            ### Compute the overlap <config'|psi>
-            over_hop = network(self.states_up[:,:Nup], r_hop) # (b,)
-            conp_psi[i, count_id] = over_hop
-            ### Determine the phase
-            stid = min(hop[0], hop[1])
-            edid = max(hop[0], hop[1])
-            count_positive = torch.sum(r_hop[:, stid+1:edid] > 0, dim=1).float()
-            phase[i, count_id] = (-1) ** count_positive
-        ## Compute the free local energy
-        e_free = -self.t * torch.sum(conp_psi * phase, 0) / over_config_psi                  # (b,)
-        ## Compute the total local energy
-        e_loc = e_free
-        return e_loc   
-
-
-    def local_energy(self, r_list: torch.Tensor, network: nn.Module, train: bool = False) -> float:
+    def local_energy(self, r_list: torch.Tensor, network: nn.Module, train: bool = False):
         """ Take a list of configurations
 
         @param r_list (Tensor): The configuration tensor of size (b, num_orbitals * sys_size)
@@ -125,8 +72,8 @@ class Hubbard():
         ## Compute <config H|psi>
         combined_hop = self.hop_list_up + self.hop_list_down
         N_hop = len(combined_hop)
-        conp_psi = torch.zeros(N_hop, r_list.size(0), dtype=torch.float, device=r_list.device)
-        phase = torch.zeros(N_hop, r_list.size(0), dtype=torch.float, device=r_list.device)
+        conp_psi = torch.zeros(N_hop, r_list.size(0), dtype=torch.float64, device=r_list.device)
+        phase = torch.zeros(N_hop, r_list.size(0), dtype=torch.float64, device=r_list.device)
         for i, hop in enumerate(combined_hop):
             ### Determine whether count the config' or not
             if hop[0] == hop[1]:
@@ -148,13 +95,14 @@ class Hubbard():
             ### Determine the phase
             stid = min(hop[0], hop[1])
             edid = max(hop[0], hop[1])
-            count_positive = torch.sum(r_hop[:, stid+1:edid] > 0, dim=1).float()
+            count_positive = torch.sum(r_hop[:, stid+1:edid] > 0, dim=1).to(torch.float64)
             phase[i, count_id] = (-1) ** count_positive
         ## Compute the free local energy
-        #over_free = torch.sum(conp_psi * phase, 0)
-        #nonzero_id = torch.nonzero(torch.abs(over_config_psi))[0]
+        over_free = torch.sum(conp_psi * phase, 0)
+        #nonzero_id = torch.nonzero(torch.abs(over_config_psi)>1e-9).squeeze()
+        #print(nonzero_id.size())
         #e_free = -self.t * over_free[nonzero_id] / over_config_psi[nonzero_id]
-        e_free = -self.t * torch.sum(conp_psi * phase, 0) / over_config_psi
+        e_free = -self.t * over_free / over_config_psi
         
         ## Compute the interacting energy
         r_up_list = (r_list[:, :N]>0).float()      # (b, sys_size)
@@ -171,11 +119,50 @@ class Hubbard():
             mean_loce_logpsi = torch.mean(e_loc.detach() * log_psi)
             loce_mean_logpsi = torch.mean(e_loc).detach() * torch.mean(log_psi)
             return 2*(mean_loce_logpsi - loce_mean_logpsi)
-            #return 2*( mean_loce_logpsi)
             ## Don't need to add variance into the loss
             #return torch.mean(e_loc) + torch.var(e_loc)
         else:
-            return torch.mean(e_loc)
+            return torch.mean(e_loc), torch.var(e_loc)
+    
+    def nk_hoplist(self, nk_list: list) -> list:
+        """ Generate the hop list for momentum particles
+
+        @param nk_list (list): [[kx_1, ky_1, up(down)], [kx_2, ky_2, up(down)], ...], one need to specify the kx,ky and the spin
+        
+        @return nkhoplist (list(list)): [[[c^1_{1, dagger}, c^1_{1}], [c^1_{2, dagger}, c^1_{2}], ...]  -> nk_1
+                                         [[c^2_{1, dagger}, c^2_{1}], [c^2_{2, dagger}, c^2_{2}], ...]  -> nk_2 
+                                         ... -> nk_n   ], the list of hop_list for each nk
+        @return nkamplist (list(list)): [[amp^1_1, amp^1_2, ...] -> nk_1
+                                         [amp^2_1, amp^2_2, ...] -> nk_2
+                                         ......
+                                         [amp^n_1, amp^n_2, ...] -> nk_n   ]
+        """
+        nkhoplist = []
+        nkamplist = []
+
+        N = self.L
+        for i, nk_hop in enumerate(nk_list):
+            kx = nk_hop[0]
+            ky = nk_hop[1]
+            spin_dir = nk_hop[2]
+            
+            hoplist = []
+            amplist = []
+            for m1 in range(N):
+                for n1 in range(N):
+                    for m2 in range(N):
+                        for n2 in range(N):
+                            c_dagger = m1 * N + n1
+                            c = m2 * N + n2
+                            if spin_dir:
+                                # True -> 1 -> spin-up, the is number should add L^2
+                                c_dagger = c_dagger + N ** 2
+                                c = c + N ** 2
+                            hoplist.append([c_dagger, c])
+
+
+        
+        return None
 
 def config2state(config):
     """ Convert a configuration to a state

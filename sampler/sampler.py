@@ -47,7 +47,7 @@ def help_position2config(positionup: torch.Tensor, Nup: int, positiondown: torch
     config.scatter_(0, id_down_ocu, ele_down_ocu)
     return config.T
 
-def generate_sample(model: nn.Module, num_samples: int, num_chains: int = 1, drop_rate: float = 0.3) -> torch.Tensor:
+def generate_sample(model: nn.Module, num_samples: int, num_chains: int = 1, drop_rate: float = 0.3, sweep_size: int = None) -> torch.Tensor:
     """ Generate samples from the model.
 
     @param model (NNB): The neural network model
@@ -71,7 +71,11 @@ def generate_sample(model: nn.Module, num_samples: int, num_chains: int = 1, dro
     positions_up = positions_up.to(model.device)
     positions_down = positions_down.to(model.device)
     prob_old = torch.ones(num_chains)  #(num_chains)
-    for i in range(num_samples):
+
+    if sweep_size is None:
+        sweep_size = LL * 2
+
+    for i in range(num_samples * sweep_size):
         # Metropolis-Hastings
         Nswap = 1
         new_positions_up = help_flip(positions_up, Nup, Nswap)
@@ -95,8 +99,12 @@ def generate_sample(model: nn.Module, num_samples: int, num_chains: int = 1, dro
             prob_old = torch.where(acceptance.unsqueeze(0), prob_new, prob_old).squeeze()
             config = help_position2config(positions_up, Nup, positions_down, Ndown)
             config = config.to(model.device)
-            samples[i,:,:] = config
-            prob_list[i] = prob_old
+            
+            if i % sweep_size == 0:
+                samples[i//sweep_size,:,:] = config
+                prob_list[i//sweep_size] = prob_old
+            #samples[i,:,:] = config
+            #prob_list[i] = prob_old
     samples = samples[drop_samples:]
     samples = samples.view(-1, 2 * LL)
     prob_list = prob_list.view(-1)

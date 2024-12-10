@@ -7,7 +7,7 @@ run.py: Run Script for Simple NNB Model
 
 Usage:
     run.py train [options]
-    run.py decode [options] MODEL_PATH TEST_SOURCE_FILE OUTPUT_FILE
+    run.py decode [options] MODEL_PATH OUTPUT_FILE
     run.py decode [options] MODEL_PATH TEST_SOURCE_FILE TEST_TARGET_FILE OUTPUT_FILE
 
 Options:
@@ -20,6 +20,7 @@ Options:
     --clip-grad=<float>                     gradient clipping [default: 5.0]
     --log-every=<int>                       log every [default: 10]
     --max-epoch=<int>                       max epoch [default: 30]
+    --max-train-iter=<int>                  max train iter [default: 1000]
     --input-feed                            use input feeding
     --patience=<int>                        wait for how many iterations to decay learning rate [default: 5]
     --max-num-trial=<int>                   terminate training after how many trials [default: 5]
@@ -43,7 +44,8 @@ from pathlib import Path
 from docopt import docopt
 
 from model.nnb_model import NNB, Hypothesis
-from model.hamiltonian import Hubbard
+from observable.hamiltonian import Hubbard
+from sampler.sampler import generate_sample
 
 import numpy as np
 from typing import List, Tuple, Dict, Set, Union
@@ -86,27 +88,25 @@ def train(args: Dict):
     @param args (Dict): args from cmd line
     """
     train_batch_size = int(args['--batch-size'])
+    max_train_iter = int(args['--max-train-iter'])
     clip_grad = float(args['--clip-grad'])
     valid_niter = int(args['--valid-niter'])
     log_every = int(args['--log-every'])
     model_save_path = args['--save-to']
 
+    n_chains = 16
+    n_samples = train_batch_size // n_chains
 
-    n_samples = 1000
-
-    # model = NMT(embed_size=int(args['--embed-size']),                                 # EDIT: 4X EMBED AND HIDDEN SIZES 
-    #             hidden_size=int(args['--hidden-size']),
-    #             dropout_rate=float(args['--dropout']),
-    #             vocab=vocab)
-
+    t = 1
+    U = 0
     L = 4
     sys_size = L * L
-    hidden_size = 128
-    num_fillings = [8, 8]
+    hidden_size = 256
+    num_fillings = [7, 7]
     model = NNB(sys_size = sys_size, 
                 hidden_size = hidden_size, 
                 num_fillings = num_fillings)
-    h_model = Hubbard(L, t=1, U=1)
+    h_model = Hubbard(L, t=t, U=U)
     
     tensorboard_path = "nnb_cuda" if args['--cuda'] else "nnb_local"
     writer = SummaryWriter(log_dir=f"./runs/{tensorboard_path}")
@@ -128,7 +128,7 @@ def train(args: Dict):
 
     num_trial = 0
     train_iter = patience = report_loss = 0
-    report_examples = epoch = valid_num = 0
+    report_examples = epoch = 0
     hist_valid_scores = []
     train_time = begin_time = time.time()
     print('begin NNB self training')
@@ -136,44 +136,43 @@ def train(args: Dict):
     while True:
         epoch += 1
 
-        train_data, prob_list = model.generate_sample(n_samples)
-        for batch_data in batch_iter(train_data, batch_size=train_batch_size, shuffle=True):
-            train_iter += 1
-
+        #train_data, prob_list = generate_sample(model, n_samples, n_chains)
+        #for batch_data in batch_iter(train_data, batch_size=train_batch_size, shuffle=True):
+        for train_iter in range(max_train_iter):
+            #train_iter += 1
             optimizer.zero_grad()
-
+            batch_data, prob_list = generate_sample(model, n_samples, n_chains)
             batch_size = batch_data.size(0)
 
-            batch_loss = h_model.energy_local(batch_data, model) 
+            batch_loss = h_model.local_energy(batch_data, model)
             batch_loss.backward()
 
             # clip gradient
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+            #grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
 
             optimizer.step()
 
             batch_losses_val = batch_loss.item()
-            report_loss += batch_losses_val * batch_size
+            report_loss = batch_losses_val
 
-            report_examples += batch_size
+            report_examples = batch_size
 
             if train_iter % log_every == 0:
-                writer.add_scalar("loss/train", report_loss / report_examples, train_iter)
-                print('epoch %d, iter %d, avg. loss %.2f' \
-                      'speed %.2f words/sec, time elapsed %.2f sec' % (epoch, train_iter,
-                                                                        report_loss / report_examples,
+                writer.add_scalar("loss/train", report_loss, train_iter)
+                print('epoch %d, iter %d, avg. loss %.2f, ' \
+                        'speed %.2f configs/sec, time elapsed %.2f sec' % (epoch, train_iter,
+                                                                        report_loss,
                                                                         report_examples / (time.time() - train_time),
                                                                         time.time() - begin_time), file=sys.stderr)
 
                 train_time = time.time()
-                report_loss = report_examples = 0.
+                #report_loss = report_examples = 0.
 
             # perform validation
             if train_iter % valid_niter == 0:
                 writer.add_scalar("loss/val", batch_losses_val, train_iter)
                 print('epoch %d, iter %d, cum. loss %.2f' % (epoch, train_iter,
-                                                             batch_losses_val), file=sys.stderr)
-                valid_num += 1
+                                                                batch_losses_val), file=sys.stderr)
 
                 print('begin validation ...', file=sys.stderr)
 
@@ -231,6 +230,11 @@ def decode(args: Dict[str, str]):
     """ Compute the ground state energy of the given neural network model.
     @param args (Dict): args from cmd line
     """
+    seed = int(time.time())  # get the time right now to be the random seed
+    print(f"Setting random seed: {seed}", file=sys.stderr)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
     print("load model from {}".format(args['MODEL_PATH']), file=sys.stderr)
     model = NNB.load(args['MODEL_PATH'])
 
@@ -238,17 +242,19 @@ def decode(args: Dict[str, str]):
         model = model.to(torch.device("cuda:0"))
 
     h_model = Hubbard(4, t=1, U=1)
-    sample, prob_list = model.generate_sample(1000)
+    sample, prob_list = model.generate_sample(16,256)
 
     Path(args['OUTPUT_FILE']).parent.mkdir(parents=True, exist_ok=True)
 
     with open(args['OUTPUT_FILE'], 'w') as f:
-        energy = h_model.energy_local(sample, model)
-        f.write(energy + '\n')
+        energy = model.local_energy(sample, h_model)
+        f.write(str(energy.item()) + '\n')
 
 def main():
     """ Main func.
     """
+    start_time = time.time()
+
     args = docopt(__doc__)
 
     # Check pytorch version
@@ -267,6 +273,10 @@ def main():
         decode(args)
     else:
         raise RuntimeError('invalid run mode')
+    
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Execution time: {elapsed_time:.2f} seconds")
 
 
 if __name__ == '__main__':

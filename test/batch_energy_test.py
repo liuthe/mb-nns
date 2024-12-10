@@ -2,7 +2,7 @@ import sys
 sys.path.append("..")
 import torch
 from model.nnb_model import NNB
-from model.hamiltonian import batch2state, Hubbard
+from observable.hamiltonian import batch2state, Hubbard
 
 # Set the basic parameter
 L = 4

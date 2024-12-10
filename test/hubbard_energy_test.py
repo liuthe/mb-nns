@@ -3,7 +3,7 @@ import sys
 sys.path.append("..")
 #sys.path.append("../model")
 from model.nnb_model import NNB
-from model.hamiltonian import Hubbard, config2state
+from observable.hamiltonian import Hubbard, config2state
 import torch
 
 L = 4
