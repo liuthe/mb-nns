@@ -12,17 +12,19 @@ class Hubbard():
     """ The Hamiltonian of Hubbard Model
     """
 
-    def __init__(self, L, t, U, num_orbitals = 7):
+    def __init__(self, Lx, Ly, t, U, num_orbitals = 7):
         """ Init Hubbard model
          
-        @param L (int): System size (one dimensionality)
+        @param Lx (int): System x size (one dimensionality)
+        @param Ly (int): System y size (one dimensionality)
         @param t (float): NN coupling
         @param U (float): Interaction energy 
         @param num_orbitals (int): The number of spin orbitals
         """
         
-        self.L = L
-        self.sys_size = L * L
+        self.Lx = Lx
+        self.Ly = Ly
+        self.sys_size = Lx * Ly
         self.t = t
         self.U = U
         self.num_orbitals = num_orbitals
@@ -35,15 +37,20 @@ class Hubbard():
         self.H_down = torch.zeros(self.sys_size, self.sys_size)
 
         # Generate the hopping and interaction pairs
-        for i in range(L):
-            for j in range(L):
-                idx = i * L + j
-                idxp = ((i + 1) % L) * L + j
-                idyp = i * L + ((j + 1) % L)
-                self.hop_list_up.append((idx, idxp))
-                self.hop_list_up.append((idx, idyp))
-                self.hop_list_down.append((idx + self.sys_size, idxp + self.sys_size))
-                self.hop_list_down.append((idx + self.sys_size, idyp + self.sys_size))
+        for i in range(Lx):
+            for j in range(Ly):
+                idx = i * Lx + j
+                idxp = ((i + 1) % Lx) * Lx + j
+                idyp = i * Lx + ((j + 1) % Ly)
+
+                idxst = min(idx, idxp)
+                idxed = max(idx, idxp)
+                idyst = min(idx, idyp)
+                idyed = max(idx, idyp)
+                self.hop_list_up.append((idxst, idxed))
+                self.hop_list_up.append((idyst, idyed))
+                self.hop_list_down.append((idxst + self.sys_size, idxed + self.sys_size))
+                self.hop_list_down.append((idyst + self.sys_size, idyed + self.sys_size))
                 
                 self.H_up[idx, idxp] = -t; self.H_up[idx, idyp] = -t
                 self.H_up[idxp, idx] = -t; self.H_up[idyp, idx] = -t
@@ -54,32 +61,112 @@ class Hubbard():
                 self.states_up = eigvectors_up.to(torch.float64)
                 eigvalues_down, eigvectors_down = torch.linalg.eigh(self.H_down)
                 self.states_down = eigvectors_down.to(torch.float64) 
+        self.hop_list = self.hop_list_up + self.hop_list_down
 
-    def local_energy(self, r_list: torch.Tensor, network: nn.Module, train: bool = False):
+    def local_energy(self, r_list: torch.Tensor, position: torch.Tensor, network: nn.Module, prob_list: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """ Take a list of configurations
 
         @param r_list (Tensor): The configuration tensor of size (b, num_orbitals * sys_size)
+        @param position (Tensor): The position tensor of size (b, num_orbitals, sys_size)
         @param network (nn.Module): The distribution network
+        @param train (bool): Whether to train the network
+        @param prob_list (Tensor): The probability list of the configurations
 
         @returns energy (float): The local energy of the configuration
         """
-        N = self.L * self.L
-        r_list = r_list.to(network.device)
-        r_list = r_list.float()
+        device = network.device
+        N = self.Lx * self.Ly
+        r_list = r_list.to(device)
+        N_samples = position.size(0)
+        position = position.to(device)
+
         ## Compute <config|psi>
-        over_config_psi = network(r_list) # (b,)
+        over_config_psi = network(r_list,position) # (b,)
 
         ## Compute <config H|psi>
-        combined_hop = self.hop_list_up + self.hop_list_down
-        N_hop = len(combined_hop)
+        N_hop = len(self.hop_list)
+        conp_psi = torch.zeros(N_hop, N_samples, dtype=torch.float64, device=device)
+        phase = torch.zeros(N_hop, N_samples, dtype=torch.float64, device=device)
+        for i, hop in enumerate(self.hop_list):
+            stid, edid = hop
+            ### Determine whether count the config' or not
+            if stid == edid:
+                does_count = (r_list[:, stid] > 0) & (r_list[:, edid] > 0)
+            else:
+                does_count = (r_list[:, stid] > 0) ^ (r_list[:, edid] > 0)
+            count_id = torch.nonzero(does_count).squeeze(1)
+            r_hop = r_list[count_id]
+            position_hop = position[count_id]
+            ### Flip the configuration 
+            r_hop[:, hop] *= -1
+            is_hop0 = position_hop == stid
+            is_hop1 = position_hop == edid
+            nothop = ~is_hop0 & ~is_hop1
+            position_hop = nothop * position_hop + is_hop0 * edid + is_hop1 * stid
+
+            ### Compute the overlap <config'|psi>
+            over_hop = network(r_hop, position_hop) # (b,)
+            conp_psi[i, count_id] = over_hop
+            ### Determine the phase           
+            count_positive = torch.sum(((r_hop[:, stid+1:edid]+1)/2), dim=1)
+            phase[i, count_id] = 1.0 - 2.0 * (count_positive % 2)
+        ## Compute the free local energy
+        over_free = torch.sum(conp_psi * phase, 0)
+        e_free = -self.t * over_free / over_config_psi
+        
+        ## Compute the interacting energy
+        r_up_list = (r_list[:, :N]>0).float()      # (b, sys_size)
+        r_down_list = (r_list[:, N:]>0).float()    # (b, sys_size)
+        num_inter = torch.sum(r_up_list * r_down_list, 1) # (b,)
+        e_inter = num_inter * self.U                      # (b,)
+        ## Compute the total local energy
+        e_loc = e_free + e_inter                          # (b,)
+
+        # Here, we need to consider the derivative of psi
+        # Therefore, the loss is similar to that in reinforcement learning
+        log_psi = torch.log(torch.abs(over_config_psi))
+        mean_loce_logpsi = torch.mean(e_loc.detach() * log_psi)
+        loce_mean_logpsi = torch.mean(e_loc).detach() * torch.mean(log_psi)
+
+        if prob_list is None:
+            E_mean = torch.mean(e_loc)
+        else:
+            E_mean = torch.sum(e_loc * prob_list)
+        return 2*(mean_loce_logpsi - loce_mean_logpsi), E_mean, torch.var(e_loc)
+        ## Don't need to add variance into the loss
+        #return torch.mean(e_loc) + torch.var(e_loc)
+    def local_energy_old(self, r_list: torch.Tensor, network: nn.Module, prob_list: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """ Take a list of configurations
+
+        @param r_list (Tensor): The configuration tensor of size (b, num_orbitals * sys_size)
+        @param position (Tensor): The position tensor of size (b, num_orbitals, sys_size)
+        @param network (nn.Module): The distribution network
+        @param train (bool): Whether to train the network
+        @param prob_list (Tensor): The probability list of the configurations
+
+        @returns energy (float): The local energy of the configuration
+        """
+        r_list = r_list.to(network.device)
+        r_list = r_list.to(torch.float64)
+        ## Compute <config|psi>
+
+        ### !!!!Caution: The position should be correct!
+        over_config_psi = network([r_list, torch.rand(1,2)]) # (b,)
+
+        ## Compute <config H|psi>
+        N_hop = len(self.hop_list)
+        over_config_psi = over_config_psi.repeat(N_hop, 1)
+
         conp_psi = torch.zeros(N_hop, r_list.size(0), dtype=torch.float64, device=r_list.device)
         phase = torch.zeros(N_hop, r_list.size(0), dtype=torch.float64, device=r_list.device)
-        for i, hop in enumerate(combined_hop):
+        for i, hop in enumerate(self.hop_list):
+            stid, edid = hop
             ### Determine whether count the config' or not
-            if hop[0] == hop[1]:
-                does_count = (r_list[:, hop[0]] > 0) & (r_list[:, hop[1]] > 0)
+            if stid == hop[1]:
+                does_count = (r_list[:, stid] > 0) & (r_list[:, edid] > 0)
             else:
-                does_count = (r_list[:, hop[0]] > 0) ^ (r_list[:, hop[1]] > 0)
+                does_count = (r_list[:, stid] > 0) ^ (r_list[:, edid] > 0)
+                #does_count = (r_list[:, hop[0]] > 0) & (r_list[:, hop[1]] < 0)
             count_id = torch.nonzero(does_count)
             if count_id.size(0) == 0:
                 continue
@@ -87,44 +174,26 @@ class Hubbard():
                 count_id = count_id.squeeze(1)
             r_hop = r_list[count_id].clone()
             ### Flip the configuration 
-            r_hop[:, hop[0]] = -r_hop[:, hop[0]]
-            r_hop[:, hop[1]] = -r_hop[:, hop[1]]
+            r_hop[:, stid] = -r_hop[:, stid]
+            r_hop[:, edid] = -r_hop[:, edid]
             ### Compute the overlap <config'|psi>
-            over_hop = network(r_hop) # (b,)
+            over_hop = network([r_hop, torch.rand(1,2)]) # (b,)
             conp_psi[i, count_id] = over_hop
             ### Determine the phase
-            stid = min(hop[0], hop[1])
-            edid = max(hop[0], hop[1])
-            count_positive = torch.sum(r_hop[:, stid+1:edid] > 0, dim=1).to(torch.float64)
-            phase[i, count_id] = (-1) ** count_positive
+            #count_positive = torch.sum(r_hop[:, stid+1:edid] > 0, dim=1).to(torch.float64)
+            #phase[i, count_id] = (-1) ** count_positive
+            count_positive = torch.sum(((r_hop[:, stid+1:edid]+1)/2), dim=1)
+            phase[i, count_id] = 1.0 - 2.0 * (count_positive % 2)
         ## Compute the free local energy
-        over_free = torch.sum(conp_psi * phase, 0)
-        #nonzero_id = torch.nonzero(torch.abs(over_config_psi)>1e-9).squeeze()
-        #print(nonzero_id.size())
-        #e_free = -self.t * over_free[nonzero_id] / over_config_psi[nonzero_id]
-        e_free = -self.t * over_free / over_config_psi
-        
-        ## Compute the interacting energy
-        r_up_list = (r_list[:, :N]>0).float()      # (b, sys_size)
-        r_down_list = (r_list[:, N:]>0).float()    # (b, sys_size)
-        num_inter = torch.sum(r_up_list * r_down_list, 1) # (b,)
-        #e_inter = num_inter[nonzero_id] * self.U         # (b,)
-        e_inter = num_inter * self.U                      # (b,)
-        ## Compute the total local energy
-        e_loc = e_free + e_inter                          # (b,)
-        if train:
-            # Here, we need to consider the derivative of psi
-            # Therefore, the loss is similar to that in reinforcement learning
-            log_psi = torch.log(torch.abs(over_config_psi))
-            mean_loce_logpsi = torch.mean(e_loc.detach() * log_psi)
-            loce_mean_logpsi = torch.mean(e_loc).detach() * torch.mean(log_psi)
-            return 2*(mean_loce_logpsi - loce_mean_logpsi)
-            ## Don't need to add variance into the loss
-            #return torch.mean(e_loc) + torch.var(e_loc)
-        else:
-            return torch.mean(e_loc), torch.var(e_loc)
+        if prob_list is None:
+            prob_list = torch.ones(r_list.size(0), dtype=torch.float64, device=r_list.device)/r_list.size(0)
+        over_all = conp_psi * phase / over_config_psi * prob_list.repeat(N_hop, 1)
+        over_free = torch.sum(over_all, 1)
+
+        return -self.t * torch.sum(over_free)
+
     
-    def nk_hoplist(self, nk_list: list) -> list:
+    def nk_hoplist(self, nk_list: list) -> Tuple[list, list]:
         """ Generate the hop list for momentum particles
 
         @param nk_list (list): [[kx_1, ky_1, up(down)], [kx_2, ky_2, up(down)], ...], one need to specify the kx,ky and the spin
@@ -140,29 +209,37 @@ class Hubbard():
         nkhoplist = []
         nkamplist = []
 
-        N = self.L
-        for i, nk_hop in enumerate(nk_list):
-            kx = nk_hop[0]
-            ky = nk_hop[1]
-            spin_dir = nk_hop[2]
-            
-            hoplist = []
-            amplist = []
-            for m1 in range(N):
-                for n1 in range(N):
-                    for m2 in range(N):
-                        for n2 in range(N):
-                            c_dagger = m1 * N + n1
-                            c = m2 * N + n2
-                            if spin_dir:
-                                # True -> 1 -> spin-up, the is number should add L^2
-                                c_dagger = c_dagger + N ** 2
-                                c = c + N ** 2
-                            hoplist.append([c_dagger, c])
+        Lx = self.Lx
+        Ly = self.Ly
+        # 创建网格，生成所有的 (m1, n1) 和 (m2, n2) 对
+        m1, n1 = np.meshgrid(np.arange(Lx), np.arange(Ly), indexing='ij')
+        m1 = m1.flatten()
+        n1 = n1.flatten()
 
+        m2, n2 = np.meshgrid(np.arange(Lx), np.arange(Ly), indexing='ij')
+        m2 = m2.flatten()
+        n2 = n2.flatten()
 
+        for kx, ky, spin_dir in nk_list:
+            # 计算 hopping operators
+            c_dagger_indices = m1 * Lx + n1
+            c_indices = m2 * Ly + n2
+
+            if spin_dir:
+                # 如果是spin up，则调整 indices
+                c_dagger_indices += Lx * Ly
+                c_indices += Lx * Ly
+
+            hoplist = np.column_stack((np.repeat(c_dagger_indices, Lx*Ly), np.tile(c_indices, Lx*Ly)))
+
+            # 计算 amplitudes
+            amplitude = np.exp(1j * kx * (m1[:, None] - m2) + 1j * ky * (n1[:, None] - n2)) /Lx/Ly
+            amplist = amplitude.flatten()
+
+            nkhoplist.append(hoplist)
+            nkamplist.append(amplist)
         
-        return None
+        return nkhoplist, nkamplist
 
 def config2state(config):
     """ Convert a configuration to a state

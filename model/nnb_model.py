@@ -75,40 +75,37 @@ class spinsep_NNB(NNB):
         super(spinsep_NNB, self).__init__(sys_size, num_fillings)
         self.hidden_size = hidden_size
         # default values
-        self.layer_up = RBM(self.input_size, self.hidden_size, self.output_size_up)
-        self.layer_down = RBM(self.input_size, self.hidden_size, self.output_size_down)
+        self.layer_up = RBM(self.input_size * 2, self.hidden_size, self.output_size_up)
+        self.layer_down = RBM(self.input_size * 2, self.hidden_size, self.output_size_down)
         self.p_neuron = nn.Parameter(torch.randn(1)) * 0.1
 
-    def forward(self, config_fermion):
+    def forward(self, config_fermion: torch.Tensor, position_fermion: torch.Tensor):
         """ Take a mini-batch of configurations of fermions, compute the probabilities of each distributiob.
 
-        @param config_fermion (Tensor): A batch of configurations of fermions, shape (b, 2 * sys_size)
+        @param configs (list[config_fermion, position_fermion]): A batch of configurations of fermions, including:
+            1. config_fermion (Tensor): A batch of occupied positions of fermions, shape (b, 2 * sys_size)
+            2. position_fermion (Tensor): A batch of positions of fermions, shape (b, Nup+Ndown)
 
         @returns probability (Tensor): a variable/tensor of shape (b, 2 * sys_size * num_fillings) representing the
                                     probability distribution of each fermion configuration. Here b = batch size.
         """
-        config_fermion = config_fermion.to(torch.float64)
-        Nsamples = config_fermion.size(0)
-        Nup = self.num_fillings[0]
-        # test whether the input has the required up and down spins
-        Ndown = self.num_fillings[1]
-        assert (Nup+Ndown) == torch.sum(config_fermion[0]>0)
-        # Divide the input into up and down spins
-        config_fermion_up = config_fermion[:, :self.input_size] # (b, input_size)
-        config_fermion_down = config_fermion[:, self.input_size:] # (b, input_size)
+        #config_fermion, position_fermion = configs
+        #config_fermion = config_fermion.to(torch.float64)
+        Nup, Ndown = self.num_fillings  
         
         # Apply the first linear layer and reshape the output
-        out_up = self.layer_up(config_fermion_up) # (b, output_size_up)
-        out_down = self.layer_down(config_fermion_down) # (b, output_size_down)
+        out_up = self.layer_up(config_fermion) # (b, output_size_up)
+        out_down = self.layer_down(config_fermion) # (b, output_size_down)
         out_up = out_up.view(-1, self.input_size, Nup) # (b, input_size, num_fillings_up)
         out_down = out_down.view(-1, self.input_size, Ndown) # (b, input_size, num_fillings_down)
 
         # Select the filled states
-        filled_up = torch.nonzero(config_fermion_up == 1).reshape(-1, Nup, 2)
-        filled_down = torch.nonzero(config_fermion_down == 1).reshape(-1, Ndown, 2)
-
-        matrices_up = out_up[torch.arange(Nsamples).unsqueeze(1), filled_up[:,:,1]]
-        matrices_down = out_down[torch.arange(Nsamples).unsqueeze(1), filled_down[:,:,1]]
+        #### position_up = position_fermion[:, :Nup]
+        #### position_down = position_fermion[:, Nup:]
+        pos_up = torch.sort(position_fermion[:, :Nup], dim=1)[0]
+        pos_down = torch.sort(position_fermion[:, Nup:], dim=1)[0] - self.input_size
+        matrices_up = torch.gather(out_up, 1, pos_up.unsqueeze(-1).expand(-1, -1, Nup))
+        matrices_down = torch.gather(out_down, 1, pos_down.unsqueeze(-1).expand(-1, -1, Ndown))
 
         det_up = torch.det(matrices_up)
         det_down = torch.det(matrices_down)
@@ -132,7 +129,7 @@ class free_NNB(NNB):
         super(free_NNB, self).__init__(sys_size, num_fillings)
         self.h_model = h_model
 
-    def forward(self, config_fermion):
+    def forward(self, configs:list[torch.Tensor, torch.Tensor]):
         """ Take a mini-batch of configurations of fermions, compute the probabilities of each distributiob.
 
         @param config_fermion (Tensor): A batch of configurations of fermions, shape (b, 2 * sys_size)
@@ -140,15 +137,11 @@ class free_NNB(NNB):
         @returns probability (Tensor): a variable/tensor of shape (b, 2 * sys_size * num_fillings) representing the
                                     probability distribution of each fermion configuration. Here b = batch size.
         """
+        config_fermion, position_fermion = configs
         config_fermion = config_fermion.to(torch.float64)
         Nsamples = config_fermion.size(0)
-        Nup = self.num_fillings[0]
-        # test whether the input has the required up and down spins
-        Ndown = self.num_fillings[1]
-        assert (Nup+Ndown) == torch.sum(config_fermion[0]>0)
-        # Divide the input into up and down spins
-        config_fermion_up = config_fermion[:, :self.input_size] # (b, input_size)
-        config_fermion_down = config_fermion[:, self.input_size:] # (b, input_size)
+        Nup, Ndown = self.num_fillings
+        
         
         # Apply the first linear layer and reshape the output
         ## Use the true ground state to compute the probability, and makes b copies of them
@@ -157,24 +150,65 @@ class free_NNB(NNB):
         state_down = self.h_model.states_down[:,:Ndown].to(self.device)
         out_down = state_down.unsqueeze(0).expand(Nsamples, -1, -1) # (b, input_size, num_fillings_down)
         # Select the filled states
-        filled_up = torch.nonzero(config_fermion_up == 1).reshape(-1, Nup, 2)
-        filled_down = torch.nonzero(config_fermion_down == 1).reshape(-1, Ndown, 2)
+        # config_fermion_up = config_fermion[:, :self.input_size] # (b, input_size)
+        # config_fermion_down = config_fermion[:, self.input_size:] # (b, input_size)
+        # indices_up = torch.where(config_fermion_up == 1)[1].view(Nsamples, Nup)
+        # indices_down = torch.where(config_fermion_down == 1)[1].view(Nsamples, Ndown)
 
-        matrices_up = out_up[torch.arange(Nsamples).unsqueeze(1), filled_up[:,:,1]]
-        matrices_down = out_down[torch.arange(Nsamples).unsqueeze(1), filled_down[:,:,1]]
+        # matrices_up = out_up[torch.arange(Nsamples).unsqueeze(1), indices_up]
+        # matrices_down = out_down[torch.arange(Nsamples).unsqueeze(1), indices_down]
+        pos_up = torch.sort(position_fermion[:, :Nup], dim=1)[0]
+        pos_down = torch.sort(position_fermion[:, Nup:], dim=1)[0] - self.input_size
+
+        matrices_up = torch.gather(out_up, 1, pos_up.unsqueeze(-1).expand(-1, -1, Nup))
+        matrices_down = torch.gather(out_down, 1, pos_down.unsqueeze(-1).expand(-1, -1, Ndown))
+
+        det_up = torch.det(matrices_up)
+        det_down = torch.det(matrices_down)
+        det_all = det_up * det_down
+        return det_all
+    def another_forward(self, configs:list[torch.Tensor, torch.Tensor]):
+        """ Take a mini-batch of configurations of fermions, compute the probabilities of each distributiob.
+
+        @param config_fermion (Tensor): A batch of configurations of fermions, shape (b, 2 * sys_size)
+
+        @returns probability (Tensor): a variable/tensor of shape (b, 2 * sys_size * num_fillings) representing the
+                                    probability distribution of each fermion configuration. Here b = batch size.
+        """
+        config_fermion, position_fermion = configs
+        config_fermion = config_fermion.to(torch.float64)
+        Nsamples = config_fermion.size(0)
+        Nup, Ndown = self.num_fillings
+        
+        
+        # Apply the first linear layer and reshape the output
+        ## Use the true ground state to compute the probability, and makes b copies of them
+        state_up = self.h_model.states_up[:,:Nup].to(self.device)
+        out_up = state_up.unsqueeze(0).expand(Nsamples, -1, -1) # (b, input_size, num_fillings_up)
+        state_down = self.h_model.states_down[:,:Ndown].to(self.device)
+        out_down = state_down.unsqueeze(0).expand(Nsamples, -1, -1) # (b, input_size, num_fillings_down)
+        # Select the filled states
+        config_fermion_up = config_fermion[:, :self.input_size] # (b, input_size)
+        config_fermion_down = config_fermion[:, self.input_size:] # (b, input_size)
+        indices_up = torch.where(config_fermion_up == 1)[1].view(Nsamples, Nup)
+        indices_down = torch.where(config_fermion_down == 1)[1].view(Nsamples, Ndown)
+
+        matrices_up = out_up[torch.arange(Nsamples).unsqueeze(1), indices_up]
+        matrices_down = out_down[torch.arange(Nsamples).unsqueeze(1), indices_down]
 
         det_up = torch.det(matrices_up)
         det_down = torch.det(matrices_down)
         det_all = det_up * det_down
         return det_all
     
-def spinsum_NNB(NNB):
+class spinsum_NNB(NNB):
     """ Neural Network Backflow Model with Spin Separation. (Luo, et al. 2019)"""
     def __init__(self, sys_size: int, hidden_size: int, num_fillings: list):
-        super(spinsep_NNB, self).__init__(sys_size, num_fillings)
+        super(spinsum_NNB, self).__init__(sys_size, num_fillings)
         self.hidden_size = hidden_size
         # default values
-        self.layer_all = RBM(self.input_size * 2, self.hidden_size, self.output_size_up + self.output_size_down)
+        out_size = self.input_size * 2 * (num_fillings[0] + num_fillings[1])
+        self.layer_all = RBM(self.input_size * 2, self.hidden_size, out_size)
         self.p_neuron = nn.Parameter(torch.randn(1)) * 0.1
 
     def forward(self, config_fermion):
@@ -195,7 +229,6 @@ def spinsum_NNB(NNB):
         # Apply the first linear layer and reshape the output
         out = self.layer_all(config_fermion) # (b, output_size_up)
         out = out.view(-1, self.input_size * 2, Nup + Ndown) # (b, input_size, num_fillings_up)
-
         # Select the filled states
         filled = torch.nonzero(config_fermion == 1).reshape(-1, Nup+Ndown, 2)
         matrices = out[torch.arange(Nsamples).unsqueeze(1), filled[:,:,1]]
